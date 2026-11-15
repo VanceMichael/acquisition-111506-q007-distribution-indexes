@@ -1,0 +1,7 @@
+{
+  "paths": [
+    "main/binary-amd64/Packages.gz",
+    "main/binary-arm64/Packages.gz"
+  ],
+  "version": 11
+}

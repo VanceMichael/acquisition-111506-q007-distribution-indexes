@@ -1,0 +1,8 @@
+Suite: stable
+Codename: bookworm
+Date: Sun, 15 Nov 2026 10:00:00 UTC
+Architectures: amd64 arm64 all
+Components: main
+SHA256:
+ 861891fdcf68c4ebd898d90e959d0d743358aa4d38783155753909c7ef50c981 212 main/binary-amd64/Packages.gz
+ 861891fdcf68c4ebd898d90e959d0d743358aa4d38783155753909c7ef50c981 212 main/binary-arm64/Packages.gz
