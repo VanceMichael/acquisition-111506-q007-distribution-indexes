@@ -21,7 +21,7 @@ export async function openStore(directory) {
     pending = next.catch(() => {});
     return next;
   };
-  return {
+  const api = {
     list() {
       const latest = new Map();
       for (const receipt of receipts) latest.set(receipt.key, receipt);
@@ -35,39 +35,72 @@ export async function openStore(directory) {
       return readFile(join(directory, 'blobs', sha));
     },
     accept(key, record, evidence) {
+      return api.acceptBatch([{ key, record, evidence }]).then(receipts => receipts[0]);
+    },
+    // 批量收件：全部条目校验通过、一次性追加日志，避免半个发行混入正式结果。
+    acceptBatch(entries) {
       return serialize(async () => {
-        if (!Array.isArray(evidence) || evidence.length === 0 || evidence.length > 30) {
-          throw Object.assign(new Error('收件需要原始依据，单次不超过30份'), { status: 422 });
+        if (!Array.isArray(entries) || entries.length === 0 || entries.length > 5000) {
+          throw Object.assign(new Error('批量收件需要1至5000条'), { status: 422 });
         }
-        const prepared = evidence.map(item => {
-          if (!item || typeof item.source !== 'string' || !item.source.trim() || typeof item.bytesBase64 !== 'string') {
-            throw Object.assign(new Error('依据必须包含来源和原始字节'), { status: 422 });
+        const prepared = entries.map(entry => {
+          const { key, record, evidence } = entry ?? {};
+          if (typeof key !== 'string' || !key.trim() || key.length > 512) {
+            throw Object.assign(new Error('业务标识无效'), { status: 422 });
           }
-          if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.bytesBase64)) {
-            throw Object.assign(new Error('依据不是标准Base64'), { status: 422 });
+          if (!record || typeof record !== 'object' || Array.isArray(record)) {
+            throw Object.assign(new Error('收件内容必须是对象'), { status: 422 });
           }
-          const bytes = Buffer.from(item.bytesBase64, 'base64');
-          const sha256 = digest(bytes);
-          if (item.sha256 && item.sha256 !== sha256) throw Object.assign(new Error('依据哈希不匹配'), { status: 422 });
-          return { bytes, ref: { source: item.source, mediaType: item.mediaType ?? 'application/octet-stream', sha256, size: bytes.length } };
+          if (!Array.isArray(evidence) || evidence.length === 0 || evidence.length > 30) {
+            throw Object.assign(new Error('收件需要原始依据，单次不超过30份'), { status: 422 });
+          }
+          const items = evidence.map(item => {
+            if (!item || typeof item.source !== 'string' || !item.source.trim() || typeof item.bytesBase64 !== 'string') {
+              throw Object.assign(new Error('依据必须包含来源和原始字节'), { status: 422 });
+            }
+            if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.bytesBase64)) {
+              throw Object.assign(new Error('依据不是标准Base64'), { status: 422 });
+            }
+            const bytes = Buffer.from(item.bytesBase64, 'base64');
+            const sha256 = digest(bytes);
+            if (item.sha256 && item.sha256 !== sha256) throw Object.assign(new Error('依据哈希不匹配'), { status: 422 });
+            return { bytes, ref: { source: item.source, mediaType: item.mediaType ?? 'application/octet-stream', sha256, size: bytes.length } };
+          });
+          const refs = items.map(item => item.ref);
+          return { key, record: structuredClone(record), items, refs, identity: digest(JSON.stringify({ key, record, refs })) };
         });
-        const refs = prepared.map(item => item.ref);
-        const identity = digest(JSON.stringify({ key, record, refs }));
-        const existing = receipts.find(receipt => receipt.identity === identity);
-        if (existing) return { ...structuredClone(existing), duplicate: true };
+        const results = [];
+        const fresh = [];
         for (const item of prepared) {
-          try {
-            await writeFile(join(directory, 'blobs', item.ref.sha256), item.bytes, { flag: 'wx' });
-          } catch (error) {
-            if (error.code !== 'EEXIST') throw error;
+          const existing = receipts.find(receipt => receipt.identity === item.identity)
+            ?? fresh.find(receipt => receipt.identity === item.identity);
+          if (existing) { results.push({ ...structuredClone(existing), duplicate: true }); continue; }
+          for (const blob of item.items) {
+            try {
+              await writeFile(join(directory, 'blobs', blob.ref.sha256), blob.bytes, { flag: 'wx' });
+            } catch (error) {
+              if (error.code !== 'EEXIST') throw error;
+            }
           }
+          const receipt = {
+            sequence: receipts.length + fresh.length + 1,
+            identity: item.identity,
+            key: item.key,
+            record: item.record,
+            evidence: item.refs,
+            receivedAt: new Date().toISOString(),
+          };
+          fresh.push(receipt);
+          results.push({ ...structuredClone(receipt), duplicate: false });
         }
-        const receipt = { sequence: receipts.length + 1, identity, key, record: structuredClone(record), evidence: refs, receivedAt: new Date().toISOString() };
-        await appendFile(journal, JSON.stringify(receipt) + '\n');
-        receipts.push(receipt);
-        return { ...structuredClone(receipt), duplicate: false };
+        if (fresh.length > 0) {
+          await appendFile(journal, fresh.map(receipt => JSON.stringify(receipt)).join('\n') + '\n');
+          receipts.push(...fresh);
+        }
+        return results;
       });
     },
     flush() { return pending; },
   };
+  return api;
 }

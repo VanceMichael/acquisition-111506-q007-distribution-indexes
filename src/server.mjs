@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { openStore } from './store.mjs';
 import { validateRecord, product } from './domain.mjs';
+import { collectFromApproval } from './collect.mjs';
 
 export async function readJson(request, limit = 8 * 1024 * 1024) {
   const chunks = [];
@@ -32,6 +33,10 @@ export async function startApplication({ directory, port = 0, host = '127.0.0.1'
         const { key, record } = validateRecord(input.record);
         const receipt = await store.accept(key, record, input.evidence);
         return sendJson(response, receipt.duplicate ? 200 : 201, receipt);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/collect') {
+        const outcome = await collectFromApproval(store, await readJson(request));
+        return sendJson(response, outcome.duplicate ? 200 : 201, outcome);
       }
       if (request.method === 'GET' && url.pathname === '/api/records') return sendJson(response, 200, store.list());
       if (request.method === 'GET' && url.pathname === '/api/history') return sendJson(response, 200, store.history(url.searchParams.get('key')));
